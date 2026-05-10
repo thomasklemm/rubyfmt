@@ -4879,12 +4879,11 @@ fn format_when_node<'src>(ps: &mut ParserState<'src>, when_node: prism::WhenNode
 }
 
 fn when_conditions_end_with_endless_range(when_node: &prism::WhenNode) -> bool {
-    if let Some(last_condition) = when_node.conditions().last() {
-        if let Some(range_node) = last_condition.as_range_node() {
-            return range_node.right().is_none();
-        }
-    }
-    false
+    when_node
+        .conditions()
+        .last()
+        .and_then(|c| c.as_range_node())
+        .is_some_and(|r| r.right().is_none())
 }
 
 fn format_while_node<'src>(ps: &mut ParserState<'src>, while_node: prism::WhileNode<'src>) {
