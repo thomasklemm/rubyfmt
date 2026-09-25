@@ -676,43 +676,48 @@ fn format_string_node<'src>(ps: &mut ParserState<'src>, string_node: prism::Stri
         return;
     }
 
-    ps.with_start_of_line(false, |ps| {
-        // Always use double quotes over single quotes/percent literals
-        if opener.is_some() {
-            ps.emit_double_quote();
-        }
+    // Quoted interiors must not be treated as heredoc body text. Otherwise a
+    // squiggly heredoc would re-indent continuation lines of nested literals
+    // and mutate their runtime value on every pass.
+    ps.with_quoted_string(|ps| {
+        ps.with_start_of_line(false, |ps| {
+            // Always use double quotes over single quotes/percent literals
+            if opener.is_some() {
+                ps.emit_double_quote();
+            }
 
-        // If opener is nil, we must be in some kind of interpolated string context, which
-        // means the contents must already be appropriately escaped -- hence we default to `true` here
-        let in_escaped_context = is_heredoc || opener.is_none_or(|s| s.starts_with(b"\""));
-        let string_content = if in_escaped_context {
-            Cow::Borrowed(string_node.content_loc().as_slice())
-        } else {
-            // For character literals (`?a`), there can be an opening loc without
-            // a closing loc. In that case, fall back to a double quote, since
-            // we render character literals as double-quoted string literals
-            let end_delim = if let Some(closer) = closer {
-                closer
+            // If opener is nil, we must be in some kind of interpolated string context, which
+            // means the contents must already be appropriately escaped -- hence we default to `true` here
+            let in_escaped_context = is_heredoc || opener.is_none_or(|s| s.starts_with(b"\""));
+            let string_content = if in_escaped_context {
+                Cow::Borrowed(string_node.content_loc().as_slice())
             } else {
-                b"\""
+                // For character literals (`?a`), there can be an opening loc without
+                // a closing loc. In that case, fall back to a double quote, since
+                // we render character literals as double-quoted string literals
+                let end_delim = if let Some(closer) = closer {
+                    closer
+                } else {
+                    b"\""
+                };
+
+                crate::string_escape::single_to_double_quoted(
+                    string_node.content_loc().as_slice(),
+                    opener.unwrap(),
+                    end_delim,
+                )
             };
 
-            crate::string_escape::single_to_double_quoted(
-                string_node.content_loc().as_slice(),
-                opener.unwrap(),
-                end_delim,
-            )
-        };
+            ps.emit_string_content(string_content);
+            ps.wind_dumping_comments_until_offset(string_node.content_loc().end_offset());
 
-        ps.emit_string_content(string_content);
-        ps.wind_dumping_comments_until_offset(string_node.content_loc().end_offset());
+            if opener.is_some() {
+                ps.emit_double_quote();
+            }
+        });
 
-        if opener.is_some() {
-            ps.emit_double_quote();
-        }
+        ps.wind_dumping_comments_until_offset(string_node.location().end_offset());
     });
-
-    ps.wind_dumping_comments_until_offset(string_node.location().end_offset());
 }
 
 fn format_interpolated_string_node<'src>(
@@ -792,7 +797,9 @@ fn format_interpolated_string_node<'src>(
                     opener.unwrap(),
                     closer.unwrap_or(b"\""),
                 );
-                ps.emit_string_content(escaped);
+                ps.with_quoted_string(|ps| {
+                    ps.emit_string_content(escaped);
+                });
             } else {
                 format_node(ps, part);
             }

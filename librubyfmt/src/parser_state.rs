@@ -70,6 +70,9 @@ pub struct ParserState<'src> {
     /// Whether we're currently rendering inside a squiggly heredoc's content.
     /// Used to mark nested non-squiggly heredocs so they don't get incorrect indentation.
     inside_squiggly_heredoc: bool,
+    /// Depth of nested quoted string literals. When > 0, emitted string contents
+    /// are quoted-string interiors rather than heredoc body text.
+    quoted_string_depth: u32,
     /// When true, strip blank lines that would otherwise be prepended to an extracted comment
     /// block. Used during call-chain element offset jumps, where a trailing-dot blank line in
     /// the source must not produce an invalid blank line before a leading-dot comment.
@@ -220,6 +223,15 @@ impl<'src> ParserState<'src> {
         self.start_of_line.push(start_of_line);
         f(self);
         self.start_of_line.pop();
+    }
+
+    pub(crate) fn with_quoted_string<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut ParserState<'src>),
+    {
+        self.quoted_string_depth += 1;
+        f(self);
+        self.quoted_string_depth -= 1;
     }
 
     pub(crate) fn breakable_of<F>(&mut self, delims: BreakableDelims, f: F)
@@ -405,7 +417,13 @@ impl<'src> ParserState<'src> {
             be.push_line_number(self.current_orig_line_number);
         }
 
-        self.push_concrete_token(ConcreteLineToken::LTStringContent { content });
+        // Quoted-string interiors must not be treated as heredoc body text: squiggly
+        // indentation of those newlines would mutate the nested string's value.
+        if self.quoted_string_depth > 0 {
+            self.push_concrete_token(ConcreteLineToken::QuotedStringContent { content });
+        } else {
+            self.push_concrete_token(ConcreteLineToken::LTStringContent { content });
+        }
     }
 
     pub(crate) fn emit_ident(&mut self, ident: &'src [u8]) {
@@ -729,6 +747,7 @@ impl<'src> ParserState<'src> {
             scopes: vec![vec![]],
             inside_squiggly_heredoc: false,
             suppress_blank_before_comment: false,
+            quoted_string_depth: 0,
         }
     }
 
@@ -843,13 +862,20 @@ impl<'src> ParserState<'src> {
         }
 
         for token in final_tokens {
-            if let ConcreteLineToken::RawHeredocContent { content } = token {
-                // Flush accumulated normal content, then add raw segment
-                flush_normal(&mut current_normal, &mut segments);
-                segments.push(HeredocSegment::Raw(content));
-            } else {
-                // Accumulate into normal content
-                current_normal.extend_from_slice(&token.into_ruby());
+            match token {
+                ConcreteLineToken::RawHeredocContent { content } => {
+                    // Flush accumulated normal content, then add raw segment
+                    flush_normal(&mut current_normal, &mut segments);
+                    segments.push(HeredocSegment::Raw(content));
+                }
+                ConcreteLineToken::QuotedStringContent { content } => {
+                    flush_normal(&mut current_normal, &mut segments);
+                    segments.push(HeredocSegment::Quoted(content.into_owned()));
+                }
+                token => {
+                    // Accumulate into normal content
+                    current_normal.extend_from_slice(&token.into_ruby());
+                }
             }
         }
 
